@@ -1,6 +1,6 @@
 {
   "buildCommand": "",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api" }
+    { "source": "/(.*)", "destination": "/api?__path=$1" }
   ]
 }

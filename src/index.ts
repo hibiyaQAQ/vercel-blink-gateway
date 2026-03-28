@@ -304,7 +304,9 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   const url = new URL(req.url || '/', `http://localhost:${PORT}`);
-  const rawPath = url.pathname;
+  // On Vercel, rewrite passes original path via __path query param
+  const pathFromQuery = url.searchParams.get('__path');
+  const rawPath = pathFromQuery ? `/${pathFromQuery}` : url.pathname;
 
   // Health check
   if (rawPath === '/' || rawPath === '/health') {
