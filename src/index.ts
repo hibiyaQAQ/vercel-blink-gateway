@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { translateChatRequest, translateImageRequest, translateEmbeddingRequest, translateMessagesRequest } from './translate.js';
+import { anthropicRequestToOpenAI, openAIResponseToAnthropic, OpenAIToAnthropicStreamTransformer } from './anthropic-openai.js';
 
 const GATEWAY_BASE = (process.env.GATEWAY_BASE_URL || 'https://ai-gateway.vercel.sh').replace(/\/$/, '');
 const BLINK_BASE = (process.env.BLINK_BASE_URL || 'https://core.blink.new/api').replace(/\/$/, '');
@@ -195,6 +196,99 @@ async function proxyPost(
   }
 }
 
+// ─── Blink Messages: Anthropic → OpenAI conversion proxy ───
+
+async function proxyBlinkMessages(
+  route: GatewayRoute,
+  body: Record<string, any>,
+  res: ServerResponse,
+) {
+  const requestModel = body.model || '';
+  const translated = anthropicRequestToOpenAI(body);
+  const isStream = !!translated.stream;
+
+  // Override path to chat/completions (Blink has no /messages endpoint)
+  const upstreamPath = '/v1/ai/chat/completions';
+
+  // Use OpenAI-style headers (no Anthropic headers for Blink)
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${route.apiKey}`,
+    'Content-Type': 'application/json',
+  };
+
+  const upstream = await fetch(`${route.base}${upstreamPath}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(translated),
+  });
+
+  if (!upstream.ok && !isStream) {
+    // Forward error in Anthropic format
+    const errBody = await upstream.text();
+    let message = `Upstream error: ${upstream.status}`;
+    try {
+      const parsed = JSON.parse(errBody);
+      message = parsed.error?.message || message;
+    } catch {}
+    res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message },
+    }));
+    return;
+  }
+
+  if (isStream) {
+    // Stream: convert OpenAI SSE → Anthropic SSE
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
+    const transformer = new OpenAIToAnthropicStreamTransformer(requestModel);
+
+    if (upstream.body) {
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, { stream: true });
+          const events = transformer.processChunk(text);
+          for (const evt of events) {
+            res.write(evt);
+          }
+        }
+      } catch {
+        // Client disconnected
+      }
+      // Flush remaining events
+      const final = transformer.flush();
+      for (const evt of final) {
+        res.write(evt);
+      }
+    }
+    res.end();
+  } else {
+    // Non-streaming: convert OpenAI response → Anthropic response
+    const responseBody = await upstream.text();
+    let anthropicResponse: any;
+    try {
+      const openaiResponse = JSON.parse(responseBody);
+      anthropicResponse = openAIResponseToAnthropic(openaiResponse, requestModel);
+    } catch {
+      anthropicResponse = {
+        type: 'error',
+        error: { type: 'api_error', message: 'Failed to parse upstream response' },
+      };
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(anthropicResponse));
+  }
+}
+
 // ─── Request handler (shared between local server and Vercel) ───
 
 export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
@@ -241,7 +335,19 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         return;
       }
       const body = cleanBody(JSON.parse(rawBody));
-      await proxyPost(route, body, req, res);
+
+      // Blink + Anthropic Messages: convert Anthropic → OpenAI → Blink
+      const isBlinkMessages = rawPath.startsWith('/blink/')
+        && rawPath.includes('/messages')
+        && !rawPath.includes('/count_tokens');
+
+      if (isBlinkMessages) {
+        await proxyBlinkMessages(route, body, res);
+      } else if (rawPath.startsWith('/blink/') && rawPath.includes('/messages/count_tokens')) {
+        sendAnthropicError(res, 501, 'count_tokens is not supported on Blink gateway');
+      } else {
+        await proxyPost(route, body, req, res);
+      }
     } else {
       sendError(res, 405, 'Method not allowed');
     }
