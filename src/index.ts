@@ -1,11 +1,14 @@
 import 'dotenv/config';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { translateChatRequest, translateImageRequest, translateEmbeddingRequest } from './translate.js';
+import { translateChatRequest, translateImageRequest, translateEmbeddingRequest, translateMessagesRequest } from './translate.js';
 
 const GATEWAY_BASE = (process.env.GATEWAY_BASE_URL || 'https://ai-gateway.vercel.sh').replace(/\/$/, '');
 const BLINK_BASE = (process.env.BLINK_BASE_URL || 'https://core.blink.new/api').replace(/\/$/, '');
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DEFAULT_API_KEY = process.env.AI_GATEWAY_API_KEY || '';
+
+// Anthropic-specific headers to forward upstream
+const ANTHROPIC_HEADERS = ['anthropic-version', 'anthropic-beta'];
 
 // ─── Gateway routing ───
 
@@ -41,6 +44,9 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 function extractClientKey(req: IncomingMessage): string {
+  // Anthropic SDK uses x-api-key header; OpenAI SDK uses Authorization: Bearer
+  const xApiKey = req.headers['x-api-key'];
+  if (typeof xApiKey === 'string' && xApiKey) return xApiKey;
   const auth = req.headers['authorization'] || '';
   return auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
 }
@@ -70,14 +76,42 @@ function sendError(res: ServerResponse, status: number, message: string) {
   }));
 }
 
+// Send error in Anthropic format
+function sendAnthropicError(res: ServerResponse, status: number, message: string) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    type: 'error',
+    error: { type: 'proxy_error', message },
+  }));
+}
+
+// Build upstream headers, forwarding Anthropic-specific headers when present
+function buildUpstreamHeaders(apiKey: string, req: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  // Determine auth style: if original request used x-api-key, keep that style
+  if (req.headers['x-api-key']) {
+    headers['x-api-key'] = apiKey;
+  } else {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
+
+  // Forward Anthropic-specific headers
+  for (const h of ANTHROPIC_HEADERS) {
+    const val = req.headers[h];
+    if (typeof val === 'string') headers[h] = val;
+  }
+
+  return headers;
+}
+
 // ─── Proxy logic ───
 
-async function proxyGet(route: GatewayRoute, res: ServerResponse) {
+async function proxyGet(route: GatewayRoute, req: IncomingMessage, res: ServerResponse) {
   const upstream = await fetch(`${route.base}${route.path}`, {
-    headers: {
-      'Authorization': `Bearer ${route.apiKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers: buildUpstreamHeaders(route.apiKey, req),
   });
 
   const body = await upstream.text();
@@ -88,6 +122,7 @@ async function proxyGet(route: GatewayRoute, res: ServerResponse) {
 async function proxyPost(
   route: GatewayRoute,
   body: Record<string, any>,
+  req: IncomingMessage,
   res: ServerResponse,
 ) {
   // Translate request based on endpoint
@@ -97,12 +132,16 @@ async function proxyPost(
 
   if (path.includes('/chat/completions')) {
     translated = translateChatRequest(body);
-    upstreamPath = path; // already mapped by resolveRoute
+    upstreamPath = path;
   } else if (path.includes('/images/generations')) {
     translated = translateImageRequest(body);
     upstreamPath = path;
   } else if (path.includes('/embeddings')) {
     translated = translateEmbeddingRequest(body);
+    upstreamPath = path;
+  } else if (path.includes('/messages')) {
+    // Anthropic Messages API (/v1/messages, /v1/messages/count_tokens)
+    translated = translateMessagesRequest(body);
     upstreamPath = path;
   } else {
     // Unknown endpoint: forward as-is
@@ -114,10 +153,7 @@ async function proxyPost(
 
   const upstream = await fetch(`${route.base}${upstreamPath}`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${route.apiKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers: buildUpstreamHeaders(route.apiKey, req),
     body: JSON.stringify(translated),
   });
 
@@ -165,7 +201,7 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -192,21 +228,30 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
 
   try {
     if (req.method === 'GET') {
-      await proxyGet(route, res);
+      await proxyGet(route, req, res);
     } else if (req.method === 'POST') {
       const rawBody = await readBody(req);
       if (!rawBody) {
-        sendError(res, 400, 'Empty request body');
+        // Use Anthropic error format for /messages endpoints
+        if (rawPath.includes('/messages')) {
+          sendAnthropicError(res, 400, 'Empty request body');
+        } else {
+          sendError(res, 400, 'Empty request body');
+        }
         return;
       }
       const body = cleanBody(JSON.parse(rawBody));
-      await proxyPost(route, body, res);
+      await proxyPost(route, body, req, res);
     } else {
       sendError(res, 405, 'Method not allowed');
     }
   } catch (err: any) {
     console.error('Proxy error:', err);
-    sendError(res, 502, `Gateway proxy error: ${err.message}`);
+    if (rawPath.includes('/messages')) {
+      sendAnthropicError(res, 502, `Gateway proxy error: ${err.message}`);
+    } else {
+      sendError(res, 502, `Gateway proxy error: ${err.message}`);
+    }
   }
 }
 
@@ -222,7 +267,9 @@ if (!process.env.VERCEL) {
     console.log(`Blink upstream:  ${BLINK_BASE}`);
     console.log();
     console.log(`Usage:`);
-    console.log(`  Vercel: set base_url to http://localhost:${PORT}/v1`);
-    console.log(`  Blink:  set base_url to http://localhost:${PORT}/blink/v1`);
+    console.log(`  OpenAI format:     base_url = http://localhost:${PORT}/v1`);
+    console.log(`  Anthropic format:  ANTHROPIC_BASE_URL=http://localhost:${PORT}`);
+    console.log(`  Blink (OpenAI):    base_url = http://localhost:${PORT}/blink/v1`);
+    console.log(`  Blink (Anthropic): ANTHROPIC_BASE_URL=http://localhost:${PORT}/blink`);
   });
 }

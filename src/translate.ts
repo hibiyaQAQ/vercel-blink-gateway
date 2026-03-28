@@ -377,6 +377,19 @@ export function translateImageRequest(body: Record<string, any>): Record<string,
   return t;
 }
 
+// ─── Anthropic Messages API translation ───
+
+export function translateMessagesRequest(body: Record<string, any>): Record<string, any> {
+  const t = { ...body };
+
+  // Add provider prefix to model name
+  if (t.model) {
+    t.model = addProviderPrefix(t.model);
+  }
+
+  return t;
+}
+
 // ─── Embeddings translation ───
 
 export function translateEmbeddingRequest(body: Record<string, any>): Record<string, any> {
