@@ -255,29 +255,44 @@ export function openAIResponseToAnthropic(
   // Build content blocks
   const content: any[] = [];
 
-  // reasoning_content → thinking block (must come before text)
-  if (message?.reasoning_content) {
-    content.push({ type: 'thinking', thinking: message.reasoning_content });
-  }
-
-  if (message?.content) {
-    content.push({ type: 'text', text: message.content });
-  }
-
-  if (message?.tool_calls && Array.isArray(message.tool_calls)) {
-    for (const tc of message.tool_calls) {
-      let input: any = {};
-      try {
-        input = JSON.parse(tc.function?.arguments || '{}');
-      } catch {
-        input = {};
+  if (message) {
+    // Case 1: content is an array of content parts (some providers return thinking as parts)
+    if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === 'thinking' || part.type === 'reasoning') {
+          content.push({ type: 'thinking', thinking: part.thinking ?? part.text ?? part.content ?? '' });
+        } else if (part.type === 'text') {
+          content.push({ type: 'text', text: part.text ?? '' });
+        }
+        // tool_use parts handled below via tool_calls
       }
-      content.push({
-        type: 'tool_use',
-        id: tc.id,
-        name: tc.function?.name || '',
-        input,
-      });
+    } else {
+      // Case 2: separate fields for reasoning and text
+      // reasoning_content / thinking_content → thinking block (must come before text)
+      const thinkingText = message.reasoning_content ?? message.thinking_content ?? message.thinking ?? null;
+      if (thinkingText) {
+        content.push({ type: 'thinking', thinking: thinkingText });
+      }
+      if (message.content) {
+        content.push({ type: 'text', text: message.content });
+      }
+    }
+
+    if (message.tool_calls && Array.isArray(message.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        let input: any = {};
+        try {
+          input = JSON.parse(tc.function?.arguments || '{}');
+        } catch {
+          input = {};
+        }
+        content.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.function?.name || '',
+          input,
+        });
+      }
     }
   }
 
@@ -455,8 +470,9 @@ export class OpenAIToAnthropicStreamTransformer {
 
     if (!delta) return output;
 
-    // reasoning_content delta → thinking block (must come before text)
-    if (delta.reasoning_content != null && delta.reasoning_content !== '') {
+    // reasoning_content / thinking_content delta → thinking block (must come before text)
+    const thinkingDelta = delta.reasoning_content ?? delta.thinking_content ?? delta.thinking ?? null;
+    if (thinkingDelta != null && thinkingDelta !== '') {
       if (this.currentBlockType !== 'thinking') {
         output.push(...this.closeCurrentBlock());
         this.currentBlockIndex++;
@@ -470,7 +486,7 @@ export class OpenAIToAnthropicStreamTransformer {
       output.push(formatSSE('content_block_delta', {
         type: 'content_block_delta',
         index: this.currentBlockIndex,
-        delta: { type: 'thinking_delta', thinking: delta.reasoning_content },
+        delta: { type: 'thinking_delta', thinking: thinkingDelta },
       }));
     }
 
