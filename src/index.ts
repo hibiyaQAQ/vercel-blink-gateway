@@ -216,10 +216,12 @@ async function proxyBlinkMessages(
     'Content-Type': 'application/json',
   };
 
+  const translatedBody = JSON.stringify(translated);
+  console.log('[blink-debug] request body:', translatedBody.slice(0, 3000));
   const upstream = await fetch(`${route.base}${upstreamPath}`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(translated),
+    body: translatedBody,
   });
 
   if (!upstream.ok && !isStream) {
