@@ -274,8 +274,7 @@ async function proxyBlinkMessages(
   } else {
     // Non-streaming: convert OpenAI response → Anthropic response
     const responseBody = await upstream.text();
-    console.log('[blink-debug] raw response:', responseBody.slice(0, 2000));
-    let anthropicResponse: any;
+let anthropicResponse: any;
     try {
       const openaiResponse = JSON.parse(responseBody);
       anthropicResponse = openAIResponseToAnthropic(openaiResponse, requestModel);

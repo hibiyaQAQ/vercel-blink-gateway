@@ -269,9 +269,13 @@ export function openAIResponseToAnthropic(
     } else {
       // Case 2: separate fields for reasoning and text
       // reasoning_content / thinking_content → thinking block (must come before text)
-      const thinkingText = message.reasoning_content ?? message.thinking_content ?? message.thinking ?? null;
+      const thinkingText = message.reasoning ?? message.reasoning_content ?? message.thinking_content ?? message.thinking ?? null;
       if (thinkingText) {
-        content.push({ type: 'thinking', thinking: thinkingText });
+        // Extract signature from reasoning_details if present (Blink format)
+        const signature = extractSignature(message.reasoning_details);
+        const thinkingBlock: any = { type: 'thinking', thinking: thinkingText };
+        if (signature) thinkingBlock.signature = signature;
+        content.push(thinkingBlock);
       }
       if (message.content) {
         content.push({ type: 'text', text: message.content });
@@ -316,6 +320,15 @@ export function openAIResponseToAnthropic(
   };
 }
 
+// Extract signature from reasoning_details array (Blink format)
+function extractSignature(reasoningDetails: any): string | null {
+  if (!Array.isArray(reasoningDetails)) return null;
+  for (const detail of reasoningDetails) {
+    if (detail.signature) return detail.signature;
+  }
+  return null;
+}
+
 function mapFinishReason(reason: string | null | undefined): string {
   switch (reason) {
     case 'stop': return 'end_turn';
@@ -342,6 +355,7 @@ export class OpenAIToAnthropicStreamTransformer {
   private inputTokens = 0;
   private outputTokens = 0;
   private buffer = '';
+  private pendingSignature: string | null = null; // accumulated signature for current thinking block
 
   constructor(model: string) {
     this.model = model;
@@ -471,7 +485,7 @@ export class OpenAIToAnthropicStreamTransformer {
     if (!delta) return output;
 
     // reasoning_content / thinking_content delta → thinking block (must come before text)
-    const thinkingDelta = delta.reasoning_content ?? delta.thinking_content ?? delta.thinking ?? null;
+    const thinkingDelta = delta.reasoning ?? delta.reasoning_content ?? delta.thinking_content ?? delta.thinking ?? null;
     if (thinkingDelta != null && thinkingDelta !== '') {
       if (this.currentBlockType !== 'thinking') {
         output.push(...this.closeCurrentBlock());
@@ -488,6 +502,12 @@ export class OpenAIToAnthropicStreamTransformer {
         index: this.currentBlockIndex,
         delta: { type: 'thinking_delta', thinking: thinkingDelta },
       }));
+    }
+
+    // reasoning_details signature (Blink streams this alongside or after reasoning text)
+    if (delta.reasoning_details && Array.isArray(delta.reasoning_details)) {
+      const sig = extractSignature(delta.reasoning_details);
+      if (sig) this.pendingSignature = sig;
     }
 
     // Text content delta
@@ -554,10 +574,20 @@ export class OpenAIToAnthropicStreamTransformer {
 
   private closeCurrentBlock(): string[] {
     if (this.currentBlockType === null) return [];
-    const output = [formatSSE('content_block_stop', {
+    const output: string[] = [];
+    // Emit signature_delta before closing a thinking block
+    if (this.currentBlockType === 'thinking' && this.pendingSignature) {
+      output.push(formatSSE('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.currentBlockIndex,
+        delta: { type: 'signature_delta', signature: this.pendingSignature },
+      }));
+      this.pendingSignature = null;
+    }
+    output.push(formatSSE('content_block_stop', {
       type: 'content_block_stop',
       index: this.currentBlockIndex,
-    })];
+    }));
     this.currentBlockType = null;
     return output;
   }
