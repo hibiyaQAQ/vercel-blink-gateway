@@ -352,9 +352,9 @@ export function openAIResponseToAnthropic(
     usage: {
       input_tokens: openai.usage?.prompt_tokens || 0,
       output_tokens: openai.usage?.completion_tokens || 0,
-      // Cache tokens from provider_metadata (Blink/Vercel format)
-      cache_creation_input_tokens: openai.usage?.provider_metadata?.anthropic?.usage?.cache_creation_input_tokens ?? 0,
-      cache_read_input_tokens: openai.usage?.provider_metadata?.anthropic?.usage?.cache_read_input_tokens ?? 0,
+      // Cache tokens: Blink puts these in choices[0].message.provider_metadata
+      cache_creation_input_tokens: choice?.message?.provider_metadata?.anthropic?.usage?.cache_creation_input_tokens ?? 0,
+      cache_read_input_tokens: choice?.message?.provider_metadata?.anthropic?.usage?.cache_read_input_tokens ?? 0,
     },
   };
 }
@@ -393,6 +393,8 @@ export class OpenAIToAnthropicStreamTransformer {
   private finishReason: string | null = null;
   private inputTokens = 0;
   private outputTokens = 0;
+  private cacheCreationTokens = 0;
+  private cacheReadTokens = 0;
   private buffer = '';
   private pendingSignature: string | null = null; // accumulated signature for current thinking block
 
@@ -455,7 +457,11 @@ export class OpenAIToAnthropicStreamTransformer {
           stop_reason: mapFinishReason(this.finishReason),
           stop_sequence: null,
         },
-        usage: { output_tokens: this.outputTokens },
+        usage: {
+          output_tokens: this.outputTokens,
+          cache_creation_input_tokens: this.cacheCreationTokens,
+          cache_read_input_tokens: this.cacheReadTokens,
+        },
       }));
       output.push(formatSSE('message_stop', { type: 'message_stop' }));
     }
@@ -511,14 +517,18 @@ export class OpenAIToAnthropicStreamTransformer {
       this.finishReason = choice.finish_reason;
     }
 
-    // Extract usage if present
-    if (choice.usage) {
-      this.inputTokens = choice.usage.prompt_tokens || this.inputTokens;
-      this.outputTokens = choice.usage.completion_tokens || this.outputTokens;
+    // Extract usage if present (prompt_tokens / completion_tokens from top-level or choice)
+    const usageSrc = parsed.usage || choice.usage;
+    if (usageSrc) {
+      this.inputTokens = usageSrc.prompt_tokens || this.inputTokens;
+      this.outputTokens = usageSrc.completion_tokens || this.outputTokens;
     }
-    if (parsed.usage) {
-      this.inputTokens = parsed.usage.prompt_tokens || this.inputTokens;
-      this.outputTokens = parsed.usage.completion_tokens || this.outputTokens;
+    // Cache tokens: Blink puts them in delta.provider_metadata or choice.delta.provider_metadata
+    const provMeta = delta?.provider_metadata ?? choice.delta?.provider_metadata;
+    if (provMeta?.anthropic?.usage) {
+      const u = provMeta.anthropic.usage;
+      this.cacheCreationTokens = u.cache_creation_input_tokens ?? this.cacheCreationTokens;
+      this.cacheReadTokens = u.cache_read_input_tokens ?? this.cacheReadTokens;
     }
 
     if (!delta) return output;
