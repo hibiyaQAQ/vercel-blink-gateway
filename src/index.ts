@@ -217,7 +217,8 @@ async function proxyBlinkMessages(
   };
 
   const translatedBody = JSON.stringify(translated);
-  console.log('[blink-debug] request body:', translatedBody.slice(0, 3000));
+  console.log('[blink-debug] providerOptions:', JSON.stringify(translated.providerOptions));
+  console.log('[blink-debug] reasoning:', JSON.stringify(translated.reasoning));
   const upstream = await fetch(`${route.base}${upstreamPath}`, {
     method: 'POST',
     headers,
@@ -339,6 +340,13 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         return;
       }
       const body = cleanBody(JSON.parse(rawBody));
+
+      if (rawPath.startsWith('/blink/') && rawPath.includes('/messages')) {
+        console.log('[blink-debug] thinking:', JSON.stringify(body.thinking));
+        console.log('[blink-debug] has cache_control in system:', Array.isArray(body.system) && body.system.some((b: any) => b.cache_control));
+        console.log('[blink-debug] has cache_control in tools:', Array.isArray(body.tools) && body.tools.some((t: any) => t.cache_control));
+        console.log('[blink-debug] tools count:', Array.isArray(body.tools) ? body.tools.length : 0);
+      }
 
       // Blink + Anthropic Messages: convert Anthropic → OpenAI → Blink
       const isBlinkMessages = rawPath.startsWith('/blink/')
