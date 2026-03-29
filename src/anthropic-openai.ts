@@ -59,11 +59,12 @@ export function anthropicRequestToOpenAI(body: Record<string, any>): Record<stri
     }
   }
 
-  // cache_control in system/messages → providerOptions.anthropic.caching: 'auto'
-  // Blink uses the same providerOptions format as Vercel for caching
+  // cache_control in system/messages → providerOptions.gateway.caching: 'auto'
+  // Vercel and Blink both use this nested format
   if (hasCacheControl(body)) {
     if (!result.providerOptions) result.providerOptions = {};
-    result.providerOptions.caching = 'auto';
+    if (!result.providerOptions.gateway) result.providerOptions.gateway = {};
+    result.providerOptions.gateway.caching = 'auto';
   }
 
   // metadata, top_k → drop
