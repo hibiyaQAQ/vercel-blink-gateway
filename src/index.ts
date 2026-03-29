@@ -251,11 +251,16 @@ async function proxyBlinkMessages(
     if (upstream.body) {
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
+      let firstChunkLogged = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           const text = decoder.decode(value, { stream: true });
+          if (!firstChunkLogged) {
+            console.log('[blink-debug] first stream chunk:', text.slice(0, 1000));
+            firstChunkLogged = true;
+          }
           const events = transformer.processChunk(text);
           for (const evt of events) {
             res.write(evt);
@@ -266,6 +271,7 @@ async function proxyBlinkMessages(
       }
       // Flush remaining events
       const final = transformer.flush();
+      console.log('[blink-debug] flush events:', final.join('').slice(0, 1000));
       for (const evt of final) {
         res.write(evt);
       }
