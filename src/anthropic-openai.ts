@@ -44,11 +44,18 @@ export function anthropicRequestToOpenAI(body: Record<string, any>): Record<stri
     result.tool_choice = convertToolChoice(body.tool_choice);
   }
 
-  // thinking → reasoning object (same conversion as translateChatRequest)
-  if (body.thinking && typeof body.thinking === 'object' && body.thinking.type === 'enabled') {
-    const budget = body.thinking.budget_tokens ?? body.thinking.budgetTokens;
-    if (budget !== undefined) {
-      result.reasoning = { max_tokens: budget, enabled: true };
+  // thinking → reasoning object
+  if (body.thinking && typeof body.thinking === 'object') {
+    if (body.thinking.type === 'adaptive') {
+      // New format: adaptive thinking — let the gateway decide budget
+      result.reasoning = { enabled: true };
+    } else if (body.thinking.type === 'enabled') {
+      const budget = body.thinking.budget_tokens ?? body.thinking.budgetTokens;
+      if (budget !== undefined) {
+        result.reasoning = { max_tokens: budget, enabled: true };
+      } else {
+        result.reasoning = { enabled: true };
+      }
     }
   }
 
@@ -70,6 +77,10 @@ function hasCacheControl(body: Record<string, any>): boolean {
   // Check system array
   if (Array.isArray(body.system)) {
     if (body.system.some((b: any) => b.cache_control)) return true;
+  }
+  // Check tools array (Claude Code puts cache_control on the last tool)
+  if (Array.isArray(body.tools)) {
+    if (body.tools.some((t: any) => t.cache_control)) return true;
   }
   // Check messages
   if (Array.isArray(body.messages)) {
@@ -341,6 +352,9 @@ export function openAIResponseToAnthropic(
     usage: {
       input_tokens: openai.usage?.prompt_tokens || 0,
       output_tokens: openai.usage?.completion_tokens || 0,
+      // Cache tokens from provider_metadata (Blink/Vercel format)
+      cache_creation_input_tokens: openai.usage?.provider_metadata?.anthropic?.usage?.cache_creation_input_tokens ?? 0,
+      cache_read_input_tokens: openai.usage?.provider_metadata?.anthropic?.usage?.cache_read_input_tokens ?? 0,
     },
   };
 }
