@@ -52,9 +52,34 @@ export function anthropicRequestToOpenAI(body: Record<string, any>): Record<stri
     }
   }
 
+  // cache_control in system/messages → providerOptions.anthropic.caching: 'auto'
+  // Blink uses the same providerOptions format as Vercel for caching
+  if (hasCacheControl(body)) {
+    if (!result.providerOptions) result.providerOptions = {};
+    if (!result.providerOptions.anthropic) result.providerOptions.anthropic = {};
+    result.providerOptions.anthropic.caching = 'auto';
+  }
+
   // metadata, top_k → drop
 
   return result;
+}
+
+// Check if any part of the request contains cache_control
+function hasCacheControl(body: Record<string, any>): boolean {
+  // Check system array
+  if (Array.isArray(body.system)) {
+    if (body.system.some((b: any) => b.cache_control)) return true;
+  }
+  // Check messages
+  if (Array.isArray(body.messages)) {
+    for (const msg of body.messages) {
+      if (Array.isArray(msg.content)) {
+        if (msg.content.some((b: any) => b.cache_control)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // ─── Message Conversion ───
