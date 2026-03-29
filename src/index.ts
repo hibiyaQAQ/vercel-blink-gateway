@@ -216,13 +216,10 @@ async function proxyBlinkMessages(
     'Content-Type': 'application/json',
   };
 
-  const translatedBody = JSON.stringify(translated);
-  console.log('[blink-debug] providerOptions:', JSON.stringify(translated.providerOptions));
-  console.log('[blink-debug] reasoning:', JSON.stringify(translated.reasoning));
   const upstream = await fetch(`${route.base}${upstreamPath}`, {
     method: 'POST',
     headers,
-    body: translatedBody,
+    body: JSON.stringify(translated),
   });
 
   if (!upstream.ok && !isStream) {
@@ -277,7 +274,8 @@ async function proxyBlinkMessages(
   } else {
     // Non-streaming: convert OpenAI response → Anthropic response
     const responseBody = await upstream.text();
-let anthropicResponse: any;
+    console.log('[blink-debug] raw response:', responseBody.slice(0, 2000));
+    let anthropicResponse: any;
     try {
       const openaiResponse = JSON.parse(responseBody);
       anthropicResponse = openAIResponseToAnthropic(openaiResponse, requestModel);
