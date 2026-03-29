@@ -44,7 +44,14 @@ export function anthropicRequestToOpenAI(body: Record<string, any>): Record<stri
     result.tool_choice = convertToolChoice(body.tool_choice);
   }
 
-  // thinking → drop (no OpenAI equivalent on Blink)
+  // thinking → reasoning object (same conversion as translateChatRequest)
+  if (body.thinking && typeof body.thinking === 'object' && body.thinking.type === 'enabled') {
+    const budget = body.thinking.budget_tokens ?? body.thinking.budgetTokens;
+    if (budget !== undefined) {
+      result.reasoning = { max_tokens: budget, enabled: true };
+    }
+  }
+
   // metadata, top_k → drop
 
   return result;
@@ -248,6 +255,11 @@ export function openAIResponseToAnthropic(
   // Build content blocks
   const content: any[] = [];
 
+  // reasoning_content → thinking block (must come before text)
+  if (message?.reasoning_content) {
+    content.push({ type: 'thinking', thinking: message.reasoning_content });
+  }
+
   if (message?.content) {
     content.push({ type: 'text', text: message.content });
   }
@@ -309,7 +321,7 @@ export class OpenAIToAnthropicStreamTransformer {
   private model: string;
   private messageStarted = false;
   private currentBlockIndex = -1;
-  private currentBlockType: 'text' | 'tool_use' | null = null;
+  private currentBlockType: 'thinking' | 'text' | 'tool_use' | null = null;
   private toolCallMap = new Map<number, { id: string; name: string }>(); // OpenAI tool_calls index → id/name
   private finishReason: string | null = null;
   private inputTokens = 0;
@@ -442,6 +454,25 @@ export class OpenAIToAnthropicStreamTransformer {
     }
 
     if (!delta) return output;
+
+    // reasoning_content delta → thinking block (must come before text)
+    if (delta.reasoning_content != null && delta.reasoning_content !== '') {
+      if (this.currentBlockType !== 'thinking') {
+        output.push(...this.closeCurrentBlock());
+        this.currentBlockIndex++;
+        this.currentBlockType = 'thinking';
+        output.push(formatSSE('content_block_start', {
+          type: 'content_block_start',
+          index: this.currentBlockIndex,
+          content_block: { type: 'thinking', thinking: '' },
+        }));
+      }
+      output.push(formatSSE('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.currentBlockIndex,
+        delta: { type: 'thinking_delta', thinking: delta.reasoning_content },
+      }));
+    }
 
     // Text content delta
     if (delta.content != null && delta.content !== '') {
